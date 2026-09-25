@@ -1,4 +1,4 @@
-# SECURITY ASSESSMENT REPORT – EARTH LAB
+# SECURITY ASSESSMENT REPORT – The Planets: Earth
 
 ## 1. Tổng quan
 
